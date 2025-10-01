@@ -1,7 +1,16 @@
 function setCORS(res){
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Origin', '*'); // при желании сузить до https://agressor-crew.ru
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Version');
+}
+
+function normalizePhoneE164(phone) {
+  if (!phone) return undefined;
+  let digits = String(phone).replace(/\D/g,'');
+  // простая эвристика для РФ: 10 цифр -> добавим 7; 8xxxxxxxxxx -> 7xxxxxxxxxx
+  if (digits.length === 10) digits = '7' + digits;
+  if (digits[0] === '8' && digits.length === 11) digits = '7' + digits.slice(1);
+  return '+' + digits;
 }
 
 export default async function handler(req, res){
@@ -10,8 +19,18 @@ export default async function handler(req, res){
   if (req.method !== 'POST') return res.status(405).json({ ok:false, reason:'method_not_allowed' });
 
   try{
-    const { paymentOption='now', amountMinor, description='Order', returnUrl } = req.body || {};
-    if (!amountMinor || !Number.isFinite(Number(amountMinor))){
+    const {
+      paymentOption = 'now',
+      amountMinor,
+      description = 'Order',
+      returnUrl,
+      currency = 'RUB',                 // <— можно менять при необходимости
+      customer = {},                    // <— { first_name, last_name, email, phone }
+      shipping = {},                    // <— { city, address }
+      locale                            // <— например 'ru', 'en', 'hy'
+    } = req.body || {};
+
+    if (!amountMinor || Number.isNaN(Number(amountMinor))){
       return res.status(400).json({ ok:false, reason:'amount_minor_required' });
     }
     if (paymentOption === 'meet'){
@@ -30,26 +49,37 @@ export default async function handler(req, res){
 
     const auth = 'Basic ' + Buffer.from(`${shopId}:${secret}`).toString('base64');
 
-    // ✅ Hosted payment page: создаём payment token
     const overpayUrl = 'https://checkout.overpay.io/ctp/api/checkouts';
+
+    // ⚙️ собираем customer/shipping для префилла
+    const first_name = (customer.first_name || '').trim() || undefined;
+    const last_name  = (customer.last_name  || '').trim() || undefined;
+    const email      = (customer.email      || '').trim() || undefined;
+    const phone      = normalizePhoneE164(customer.phone);
+
     const body = {
       checkout: {
         transaction_type: 'payment',
-        // можно включить виджет в iframe, но для редиректа не обязательно
         iframe: false,
         order: {
-          amount: Number(amountMinor),     // сумма в минорных единицах
-          currency: 'RUB',                 // ISO-4217 alpha-3 для рубля
-          description: description
+          amount: Number(amountMinor),   // минорные единицы
+          currency,
+          description
         },
-        // URLы возврата/нотификаций
+        // ✅ префилл контактных полей на платёжной странице
+        customer: { first_name, last_name, email, phone },
+        // опционально — логистика
+        shipping: {
+          city: (shipping.city || '').trim() || undefined,
+          address: (shipping.address || '').trim() || undefined
+        },
         success_url: finalReturnUrl,
         decline_url: finalReturnUrl,
         fail_url: finalReturnUrl,
         cancel_url: finalReturnUrl,
         notification_url: notificationUrl,
-        // локаль платежной страницы можно передать (ru/en/hy и т.д.)
-        settings: { }
+        // можно зафиксировать язык платёжной страницы
+        settings: locale ? { locale } : {}
       }
     };
 
