@@ -1,0 +1,13 @@
+
+export default function handler(req, res) {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.status(200).send(`<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Спасибо! Заказ оформлен</title>
+<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#fafafa;color:#111} .card{background:#fff;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.08);padding:32px;max-width:560px} h1{font-size:24px;margin:0 0 12px} p{margin:0 0 8px;line-height:1.5}</style>
+</head><body><div class="card">
+  <h1>Спасибо! Заказ оформлен</h1>
+  <p>Вы можете закрыть эту страницу. Если оплатили онлайн — подтверждение придёт на почту.</p>
+</div></body></html>`);
+}
