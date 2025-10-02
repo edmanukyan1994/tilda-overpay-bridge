@@ -7,7 +7,7 @@ function setCORS(res){
 function normalizePhoneE164(phone) {
   if (!phone) return undefined;
   let digits = String(phone).replace(/\D/g,'');
-  if (digits.length === 10) digits = '7' + digits; // добавляем код страны для РФ
+  if (digits.length === 10) digits = '7' + digits;
   if (digits[0] === '8' && digits.length === 11) digits = '7' + digits.slice(1);
   return '+' + digits;
 }
@@ -37,7 +37,7 @@ export default async function handler(req, res){
       return res.status(500).json({ ok:false, reason:'env_missing' });
     }
 
-    // ✅ Ссылки возврата
+    // ✅ Твои страницы возврата
     const successUrl = "https://agressor-crew.ru/pay_success";
     const failUrl    = "https://agressor-crew.ru/pay_fail";
     const cancelUrl  = "https://agressor-crew.ru/pay_cancel";
@@ -67,6 +67,8 @@ export default async function handler(req, res){
           city: (shipping.city || '').trim() || undefined,
           address: (shipping.address || '').trim() || undefined
         },
+        // ⚡ Обязательно добавляем return_url для APM (SBP и др.)
+        return_url: successUrl,
         success_url: successUrl,
         decline_url: failUrl,
         fail_url: failUrl,
