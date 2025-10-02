@@ -24,28 +24,34 @@ export default async function handler(req, res){
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ ok:false, reason:'method_not_allowed' });
 
-  const TILDA_LOGIN      = process.env.TILDA_LOGIN;      // из «универсальной платёжки»
-  const TILDA_SECRET     = process.env.TILDA_SECRET;     // «Секрет для подписи заказа»
+  const TILDA_LOGIN      = process.env.TILDA_LOGIN;      // логин из универсальной платёжки
+  const TILDA_SECRET     = process.env.TILDA_SECRET;     // секрет для подписи заказа
   const TILDA_NOTIFY_URL = process.env.TILDA_NOTIFY_URL; // https://forms.tildacdn.com/payment/custom/psXXXX
   if (!TILDA_LOGIN || !TILDA_SECRET || !TILDA_NOTIFY_URL){
     return res.status(500).json({ ok:false, reason:'tilda_env_missing' });
   }
 
   try{
-    // 1) что прислал Overpay
+    // 1) данные от Overpay
     const op = req.body || {};
 
-    // 2) достаём order_ref из query (?order_ref=...), мы приклеили его в create.js
-    const order_ref = (req.query && req.query.order_ref) ? String(req.query.order_ref) : '';
+    // 2) order_ref — пробуем достать из разных мест
+    const order_ref =
+      (req.query?.order_ref) ||
+      (req.body?.order_ref) ||
+      (op?.order_ref) ||
+      (op?.metadata?.order_ref) ||
+      (op?.order?.description?.match(/AGC-\d+/)?.[0]) ||
+      '';
 
-    // 3) маппинг статуса Overpay → статус для Тильды
+    // 3) маппинг статуса
     const raw = (op?.status || op?.checkout?.status || op?.transaction?.status || '').toString().toLowerCase();
     let status = raw;
-    if (raw === 'succeeded' || raw === 'success' || raw === 'paid') status = 'succeeded';
-    if (raw === 'failed' || raw === 'declined') status = 'failed';
-    if (raw === 'canceled' || raw === 'cancelled') status = 'canceled';
+    if (['succeeded','success','paid'].includes(raw)) status = 'succeeded';
+    if (['failed','declined'].includes(raw)) status = 'failed';
+    if (['canceled','cancelled'].includes(raw)) status = 'canceled';
 
-    // 4) сумма в МАЖОРНЫХ (RUB): если получили в минорных — делим на 100
+    // 4) сумма в МАЖОРНЫХ (RUB)
     let amountMajor = '';
     if (typeof op?.order?.amount === 'number') {
       amountMajor = (op.order.amount / 100).toFixed(2);
@@ -53,13 +59,13 @@ export default async function handler(req, res){
       amountMajor = String(op.order.amount_major);
     }
 
-    // 5) собираем payload для Тильды (минимально достаточно)
+    // 5) payload для Тильды
     const payload = {
       login: TILDA_LOGIN,
-      orderid: order_ref,                                       // в «универсалке»: Номер заказа → order_ref
+      orderid: order_ref,                                       // Номер заказа
       amount: amountMajor || '',
       currency: op?.order?.currency || 'RUB',
-      status,                                                   // «Признак успешного платежа» = status=succeeded
+      status,                                                   // Признак успешного платежа
       transaction_id: op?.id || op?.checkout?.token || op?.transaction?.uid || '',
       description: op?.order?.description || '',
       email: op?.customer?.email || '',
@@ -80,11 +86,10 @@ export default async function handler(req, res){
     });
     const text = await r.text();
 
-    // 8) успех, если Тильда ответила 200 и содержит OK (или пусто)
     const ok = r.ok && (text.trim().toUpperCase().includes('OK') || text.trim()==='');
     console.log('[TILDA_NOTIFY]', r.status, text.slice(0,200));
 
-    return res.status(200).json({ ok, forwarded:r.status, tilda:text.slice(0,400) });
+    return res.status(200).json({ ok, forwarded:r.status, tilda:text.slice(0,400), sent:payload });
   }catch(e){
     console.error('[WEBHOOK_ERROR]', e);
     return res.status(500).json({ ok:false, reason:'internal_error', error:String(e) });
