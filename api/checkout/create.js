@@ -41,7 +41,7 @@ export default async function handler(req, res){
     const successUrl = "https://agressor-crew.ru/pay_success";
     const failUrl    = "https://agressor-crew.ru/pay_fail";
     const cancelUrl  = "https://agressor-crew.ru/pay_cancel";
-    const notificationUrl = `${base}/api/payments/webhook`;
+    const notification_url = `${APP_BASE_URL}/api/payments/webhook`;
 
     const auth = 'Basic ' + Buffer.from(`${shopId}:${secret}`).toString('base64');
 
