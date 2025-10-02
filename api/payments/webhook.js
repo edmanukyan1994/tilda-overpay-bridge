@@ -62,7 +62,7 @@ export default async function handler(req, res){
     // 5) payload для Тильды
     const payload = {
       login: TILDA_LOGIN,
-      orderid: order_ref,                                       // Номер заказа
+      order_ref: order_ref,                                       // Номер заказа
       amount: amountMajor || '',
       currency: op?.order?.currency || 'RUB',
       status,                                                   // Признак успешного платежа
