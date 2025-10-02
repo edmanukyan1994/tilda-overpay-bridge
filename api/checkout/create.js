@@ -1,8 +1,17 @@
 // /api/checkout/create.js
+
 function setCORS(res){
-  res.setHeader('Access-Control-Allow-Origin', '*'); // при желании сузьте до вашего домена
+  res.setHeader('Access-Control-Allow-Origin', '*'); // при желании сузьте до домена магазина
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Version');
+}
+
+function normalizeBase(urlLike){
+  const raw = (urlLike || '').trim();
+  if (!raw) return 'https://checkout.overpay.io';
+  let base = raw.replace(/\/+$/,'');              // убираем хвостовые /
+  if (!/^https?:\/\//i.test(base)) base = 'https://' + base; // если вдруг без схемы — добавим
+  return base;                                     // напр. https://checkout.overpay.io
 }
 
 function normalizePhoneE164(phone) {
@@ -20,10 +29,10 @@ export default async function handler(req, res){
 
   try{
     const {
-      order_ref = '',            // ← пришло с фронта, также уйдёт в webhook query
+      order_ref = '',
       amountMinor,
       description = 'Order',
-      customer = {},
+      customer = {},                 // { first_name, last_name, email, phone }
       locale = 'ru'
     } = req.body || {};
 
@@ -32,54 +41,57 @@ export default async function handler(req, res){
       return res.status(400).json({ ok:false, reason:'amount_minor_required' });
     }
 
-    const shopId = process.env.OVERPAY_SHOP_ID;
-    const secret = process.env.OVERPAY_SECRET;
-    const base = (process.env.APP_BASE_URL || '').replace(/\/$/, '');
-    if (!shopId || !secret || !base){
+    const shopId  = (process.env.OVERPAY_SHOP_ID   || '').trim();
+    const secret  = (process.env.OVERPAY_SECRET    || '').trim();
+    const appBase = (process.env.APP_BASE_URL      || '').trim().replace(/\/$/, '');
+    const apiBase = normalizeBase(process.env.OVERPAY_API_BASE || 'https://checkout.overpay.io');
+    if (!shopId || !secret || !appBase){
       return res.status(500).json({
-        ok:false,
-        reason:'env_missing',
-        details: { hasShopId: !!shopId, hasSecret: !!secret, hasBase: !!base }
+        ok:false, reason:'env_missing',
+        details:{ hasShopId:!!shopId, hasSecret:!!secret, hasAppBase:!!appBase }
       });
     }
 
-    // ваши страницы возврата (клиент увидит их после оплаты/отмены)
+    // конечная точка Overpay
+    const overpayUrl = `${apiBase}/ctp/api/checkouts`;
+
+    // ваши страницы возврата (как договорились — страницы сайта)
     const successUrl = "https://agressor-crew.ru/pay_success";
     const failUrl    = "https://agressor-crew.ru/pay_fail";
     const cancelUrl  = "https://agressor-crew.ru/pay_cancel";
+    const declineUrl = failUrl;
 
-    // webhook: добавляем order_ref в query, чтобы потом без БД связать оплату и заказ
-    const notificationUrl = `${base}/api/payments/webhook` + (order_ref ? `?order_ref=${encodeURIComponent(order_ref)}` : '');
+    // webhook: приклеим order_ref, чтобы потом связать платёж с заказом без БД
+    const notificationUrl = `${appBase}/api/payments/webhook${order_ref ? `?order_ref=${encodeURIComponent(order_ref)}` : ''}`;
 
-    // клиентские данные (префилл на платёжной странице)
+    // данные покупателя (префилл на стороне Overpay)
     const first_name = (customer.first_name || '').trim() || undefined;
     const last_name  = (customer.last_name  || '').trim() || undefined;
     const email      = (customer.email      || '').trim() || undefined;
     const phone      = normalizePhoneE164(customer.phone);
 
-    // тело запроса к Overpay (redirect-URL ВНУТРИ settings!)
+    // тело запроса: redirect-URL строго внутри settings (требование Overpay)
     const body = {
       checkout: {
         transaction_type: 'payment',
         iframe: false,
         order: {
-          amount: amt,                 // минорные единицы (RUB копейки)
+          amount: amt,               // МИНОРНЫЕ единицы (копейки)
           currency: 'RUB',
           description
         },
         customer: { first_name, last_name, email, phone },
-        notification_url: notificationUrl,
         settings: {
-          locale,
-          success_url: successUrl,
-          fail_url: failUrl,
-          cancel_url: cancelUrl
+          success_url:     successUrl,
+          fail_url:        failUrl,
+          cancel_url:      cancelUrl,
+          decline_url:     declineUrl,
+          notification_url: notificationUrl,
+          locale: (locale || 'ru').toLowerCase()
         }
       }
     };
 
-    const apiBase = process.env.OVERPAY_API_BASE || 'https://checkout.overpay.io';
-    const overpayUrl = `${apiBase}/ctp/api/checkouts`;
     const auth = 'Basic ' + Buffer.from(`${shopId}:${secret}`).toString('base64');
 
     const resp = await fetch(overpayUrl, {
@@ -95,29 +107,21 @@ export default async function handler(req, res){
 
     const text = await resp.text();
     let data = {};
-    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw:text }; }
 
     const redirectUrl  = data?.checkout?.redirect_url || data?.redirect_url;
     const paymentToken = data?.checkout?.token        || data?.token;
 
     if (!resp.ok || !redirectUrl){
       return res.status(502).json({
-        ok:false,
-        reason:'overpay_error',
-        httpStatus: resp.status,
-        data
+        ok:false, reason:'overpay_no_redirect',
+        httpStatus: resp.status, data
       });
     }
 
-    return res.status(200).json({
-      ok: true,
-      next: 'redirect',
-      redirectUrl,
-      token: paymentToken,
-      order_ref
-    });
-
+    return res.status(200).json({ ok:true, next:'redirect', redirectUrl, token: paymentToken, order_ref });
   }catch(e){
+    console.error('[CREATE_ERROR]', e);
     return res.status(500).json({ ok:false, reason:'internal_error', error:String(e) });
   }
 }
