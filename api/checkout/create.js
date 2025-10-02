@@ -24,16 +24,14 @@ export default async function handler(req, res){
       customer = {},
       shipping = {},
       locale = 'ru',
-      metadata = {}
+      // metadata и shipping Overpay HPP не требуют — не шлём их, чтобы не ловить валидацию
     } = req.body || {};
 
-    // 1) Валидация суммы
     const amt = Number(amountMinor);
     if (!Number.isFinite(amt) || amt <= 0){
       return res.status(400).json({ ok:false, reason:'amount_minor_required' });
     }
 
-    // 2) Переменные окружения
     const shopId = process.env.OVERPAY_SHOP_ID;
     const secret = process.env.OVERPAY_SECRET;
     const base = (process.env.APP_BASE_URL || '').replace(/\/$/, '');
@@ -45,13 +43,15 @@ export default async function handler(req, res){
       });
     }
 
-    // 3) URL'ы возврата/вебхука
+    // Ваши страницы возврата
     const successUrl = "https://agressor-crew.ru/pay_success";
     const failUrl    = "https://agressor-crew.ru/pay_fail";
     const cancelUrl  = "https://agressor-crew.ru/pay_cancel";
+
+    // Webhook — остаётся верхним полем checkout
     const notificationUrl = `${base}/api/payments/webhook`;
 
-    // 4) Тело запроса в Overpay
+    // Формируем тело в нужной схеме: редиректы — ВНУТРИ settings
     const first_name = (customer.first_name || '').trim() || undefined;
     const last_name  = (customer.last_name  || '').trim() || undefined;
     const email      = (customer.email      || '').trim() || undefined;
@@ -62,28 +62,26 @@ export default async function handler(req, res){
         transaction_type: 'payment',
         iframe: false,
         order: {
-          amount: amt,                  // минорные единицы
+          amount: amt,
           currency: 'RUB',
-          description: `${description}${metadata.order_ref ? ` [${metadata.order_ref}]` : ''}`
+          description
         },
         customer: { first_name, last_name, email, phone },
-        shipping: {
-          city: (shipping.city || '').trim() || undefined,
-          address: (shipping.address || '').trim() || undefined
-        },
-        metadata,                       // ← связь заказ↔платёж (order_ref и др.)
-        success_url: successUrl,
-        decline_url: failUrl,
-        fail_url: failUrl,
-        cancel_url: cancelUrl,
         notification_url: notificationUrl,
-        settings: { locale }
+        settings: {
+          locale,
+          success_url: successUrl,
+          fail_url: failUrl,
+          cancel_url: cancelUrl
+          // при необходимости Overpay может требовать return_url — тогда добавим сюда:
+          // return_url: successUrl
+        }
       }
     };
 
-    // 5) Запрос в Overpay
+    const apiBase = process.env.OVERPAY_API_BASE || 'https://checkout.overpay.io';
+    const overpayUrl = `${apiBase}/ctp/api/checkouts`;
     const auth = 'Basic ' + Buffer.from(`${shopId}:${secret}`).toString('base64');
-    const overpayUrl = 'https://checkout.overpay.io/ctp/api/checkouts';
 
     const resp = await fetch(overpayUrl, {
       method: 'POST',
@@ -96,7 +94,6 @@ export default async function handler(req, res){
       body: JSON.stringify(body)
     });
 
-    // читаем как текст (чтобы при ошибке видеть оригинал), затем пробуем JSON
     const text = await resp.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
@@ -117,8 +114,7 @@ export default async function handler(req, res){
       ok: true,
       next: 'redirect',
       redirectUrl,
-      token: paymentToken,
-      orderRef: metadata.order_ref || null
+      token: paymentToken
     });
 
   }catch(e){
