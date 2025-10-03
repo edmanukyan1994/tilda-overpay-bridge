@@ -1,7 +1,7 @@
 // /api/checkout/create.js
 
 function setCORS(res){
-  res.setHeader('Access-Control-Allow-Origin', '*'); // при желании сузьте до домена магазина
+  res.setHeader('Access-Control-Allow-Origin', '*'); // при желании сузьте до своего домена
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Version');
 }
@@ -9,7 +9,7 @@ function setCORS(res){
 function normalizeBase(urlLike){
   const raw = (urlLike || '').trim();
   if (!raw) return 'https://checkout.overpay.io';
-  let base = raw.replace(/\/+$/,'');              // убираем хвостовые /
+  let base = raw.replace(/\/+$/,'');               // убираем хвостовые /
   if (!/^https?:\/\//i.test(base)) base = 'https://' + base; // если вдруг без схемы — добавим
   return base;                                     // напр. https://checkout.overpay.io
 }
@@ -17,7 +17,7 @@ function normalizeBase(urlLike){
 function normalizePhoneE164(phone) {
   if (!phone) return undefined;
   let d = String(phone).replace(/\D/g,'');
-  if (d.length === 10) d = '7' + d;                   // 10 цифр -> +7XXXXXXXXXX
+  if (d.length === 10) d = '7' + d;             // 10 цифр -> +7XXXXXXXXXX
   if (d[0] === '8' && d.length === 11) d = '7' + d.slice(1);
   return '+' + d;
 }
@@ -31,20 +31,26 @@ export default async function handler(req, res){
     const {
       order_ref = '',
       amountMinor,
+      amountMajor,
       description = 'Order',
       customer = {},                 // { first_name, last_name, email, phone }
       locale = 'ru'
     } = req.body || {};
 
-    const amt = Number(amountMinor);
+    // Сумма: приоритет у amountMinor (копейки). Если нет — берём amountMajor (рубли) и умножаем на 100
+    const amt = Number.isFinite(Number(amountMinor))
+      ? Number(amountMinor)
+      : Math.round(Number(amountMajor) * 100);
+
     if (!Number.isFinite(amt) || amt <= 0){
-      return res.status(400).json({ ok:false, reason:'amount_minor_required' });
+      return res.status(400).json({ ok:false, reason:'amount_required' });
     }
 
     const shopId  = (process.env.OVERPAY_SHOP_ID   || '').trim();
     const secret  = (process.env.OVERPAY_SECRET    || '').trim();
     const appBase = (process.env.APP_BASE_URL      || '').trim().replace(/\/$/, '');
     const apiBase = normalizeBase(process.env.OVERPAY_API_BASE || 'https://checkout.overpay.io');
+
     if (!shopId || !secret || !appBase){
       return res.status(500).json({
         ok:false, reason:'env_missing',
@@ -52,25 +58,25 @@ export default async function handler(req, res){
       });
     }
 
-    // конечная точка Overpay
+    // Конечная точка Overpay
     const overpayUrl = `${apiBase}/ctp/api/checkouts`;
 
-    // ваши страницы возврата (как договорились — страницы сайта)
-    const successUrl = "https://agressor-crew.ru/pay_success";
-    const failUrl    = "https://agressor-crew.ru/pay_fail";
-    const cancelUrl  = "https://agressor-crew.ru/pay_cancel";
+    // Страницы возврата на вашем сайте (Lovable)
+    const successUrl = "https://agressor-crew.com/pay_success";
+    const failUrl    = "https://agressor-crew.com/pay_fail";
+    const cancelUrl  = "https://agressor-crew.com/pay_cancel";
     const declineUrl = failUrl;
 
-    // webhook: приклеим order_ref, чтобы потом связать платёж с заказом без БД
+    // Webhook: приклеим order_ref, чтобы связать платёж с заказом без БД
     const notificationUrl = `${appBase}/api/payments/webhook${order_ref ? `?order_ref=${encodeURIComponent(order_ref)}` : ''}`;
 
-    // данные покупателя (префилл на стороне Overpay)
+    // Данные покупателя (префилл на стороне Overpay)
     const first_name = (customer.first_name || '').trim() || undefined;
     const last_name  = (customer.last_name  || '').trim() || undefined;
     const email      = (customer.email      || '').trim() || undefined;
     const phone      = normalizePhoneE164(customer.phone);
 
-    // тело запроса: redirect-URL строго внутри settings (требование Overpay)
+    // Тело запроса: redirect-URL строго внутри settings (требование Overpay)
     const body = {
       checkout: {
         transaction_type: 'payment',
