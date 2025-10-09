@@ -91,7 +91,7 @@ export default async function handler(req, res) {
     const resp = await fetch(`${APISHIP_BASE}/calculator`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': token,
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       },
