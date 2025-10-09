@@ -7,7 +7,7 @@ function setCORS(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-const APISHIP_BASE = 'https://api.apiship.ru/v1';
+const APISHIP_BASE = process.env.APISHIP_BASE || 'https://api.apiship.ru'; // без /v1
 
 export default async function handler(req, res) {
   setCORS(res);
@@ -17,10 +17,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // --- ENV (минимум) ---
-    const token = process.env.APISHIP_TOKEN;
-    const senderId = process.env.APISHIP_SENDER_ID;            // 2679
-    const senderGuid = process.env.APISHIP_SENDER_GUID;        // 5f29...9d5f
+    // ENV
+    const token = process.env.APISHIP_TOKEN;            // например: 3613dd9...
+    const senderId = process.env.APISHIP_SENDER_ID;     // 2679
+    const senderGuid = process.env.APISHIP_SENDER_GUID; // 5f29...9d5f
 
     if (!token || !senderId || !senderGuid) {
       return res.status(500).json({
@@ -30,24 +30,21 @@ export default async function handler(req, res) {
       });
     }
 
-    // --- входные данные от фронта ---
+    // Входные поля
     const {
-      // куда доставляем (любой из вариантов работает; чем точнее — тем лучше)
       toGuid,                  // GUID города получателя (предпочтительно)
       toCity,                  // название города (если нет GUID)
       toAddress,               // улица/дом (опционально)
-      // груз
       weightKg,                // вес в кг (напр. 0.8)
-      lengthCm, widthCm, heightCm, // габариты в см (опционально)
-      // деньги
-      declaredValue,           // объявленная ценность, ₽
-      // опции
-      pickup = true,           // забор от склада/пункта (true)
-      delivery = true,         // доставка до клиента (true)
-      services = {}            // доп. услуги ApiShip (если знаешь коды)
+      lengthCm, widthCm, heightCm, // габариты в см (опц.)
+      declaredValue,           // объявленная ценность, ₽ (число)
+      // Опционально можно ограничить перевозчиков
+      providerKeys,            // массив строк, например: ["cdek","boxberry","dpd"]
+      // Режимы (по умолчанию считаем обе стороны)
+      pickup = true,           // забор у отправителя (true)
+      delivery = true          // доставка до получателя (true)
     } = req.body || {};
 
-    // базовая валидация
     if (!toGuid && !toCity) {
       return res.status(400).json({ ok: false, reason: 'dest_required' });
     }
@@ -55,50 +52,52 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, reason: 'weight_required' });
     }
 
-    // формируем тело запроса под калькулятор ApiShip
-    // Схема совместима с актуальным API: from/to, packages, options.
-    // Если у тебя есть точные требования под вашего тарифа — добавим поля.
+    // Калькулятор ждёт вес в ГРАММАХ и плоские размеры
+    const weightG = Math.round(Number(weightKg) * 1000);
+
+    // pickupTypes / deliveryTypes:
+    // 1 — до двери, 2 — до ПВЗ (оставляем обе опции, чтобы получить максимум вариантов)
+    const pickupTypes = pickup ? [1, 2] : [];
+    const deliveryTypes = delivery ? [1, 2] : [];
+
     const payload = {
+      weight: weightG,
+      width:  widthCm  != null ? Number(widthCm)  : undefined,
+      height: heightCm != null ? Number(heightCm) : undefined,
+      length: lengthCm != null ? Number(lengthCm) : undefined,
+      assessedCost: declaredValue != null ? Number(declaredValue) : undefined,
+
+      pickupTypes,
+      deliveryTypes,
+
       from: {
-        // склад-отправитель
+        countryCode: 'RU',
         cityGuid: String(senderGuid),
         warehouseId: Number(senderId)
+        // addressString можно не указывать, если склад задан через warehouseId
       },
       to: {
-        // можно передать GUID города или просто название
+        countryCode: 'RU',
         cityGuid: toGuid ? String(toGuid) : undefined,
         city: (!toGuid && toCity) ? String(toCity) : undefined,
-        address: toAddress ? String(toAddress) : undefined
+        addressString: toAddress ? String(toAddress) : undefined
       },
-      packages: [
-        {
-          // ApiShip ожидает размеры обычно в сантиметрах, вес — в килограммах
-          weight: Number(weightKg),
-          length: lengthCm ? Number(lengthCm) : undefined,
-          width:  widthCm  ? Number(widthCm)  : undefined,
-          height: heightCm ? Number(heightCm) : undefined,
-          assessedCost: declaredValue != null ? Number(declaredValue) : undefined
-        }
-      ],
-      options: {
-        pickup: Boolean(pickup),
-        delivery: Boolean(delivery),
-        ...(services || {})
-      }
+
+      // опционально: ограничение по операторам
+      providerKeys: Array.isArray(providerKeys) && providerKeys.length ? providerKeys : undefined
     };
 
-    // делаем запрос в ApiShip
+    // Запрос в ApiShip (ВАЖНО: Authorization без Bearer)
     const resp = await fetch(`${APISHIP_BASE}/calculator`, {
       method: 'POST',
       headers: {
-        'Authorization': token,
+        'Authorization': token,           // ← без "Bearer "
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       },
       body: JSON.stringify(payload)
     });
 
-    // пробуем читать JSON/текст (ApiShip иногда присылает детальные ошибки как текст)
     const text = await resp.text();
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
@@ -113,12 +112,13 @@ export default async function handler(req, res) {
       });
     }
 
-    // Нормализуем удобный ответ фронту
-    const offers = Array.isArray(data?.offers) ? data.offers : data?.data || data;
+    // Нормализуем ответ: где-то это data.offers, где-то сразу список
+    const offers = Array.isArray(data?.offers) ? data.offers : (Array.isArray(data) ? data : data?.data || data);
+
     return res.status(200).json({
       ok: true,
-      offers,        // список предложений служб: цена, срок, служба, режимы (курьер/ПВЗ)
-      raw: data      // полный оригинальный ответ (на всякий случай)
+      offers,
+      raw: data
     });
   } catch (e) {
     return res.status(500).json({ ok: false, reason: 'internal_error', error: String(e) });
