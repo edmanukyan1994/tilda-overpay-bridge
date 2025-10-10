@@ -1,9 +1,9 @@
 // /api/apiship/calc.js
-// Vercel Serverless Function — расчёт доставки через ApiShip (calc-v2.2)
+// Vercel Serverless Function — расчёт доставки через ApiShip (calc-v2.3)
 
 function setCORS(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
@@ -11,6 +11,15 @@ const APISHIP_BASE = process.env.APISHIP_BASE || 'https://api.apiship.ru/v1';
 
 export default async function handler(req, res) {
   setCORS(res);
+
+  // Лёгкий GET-пинг для проверки деплоя
+  if (req.method === 'GET') {
+    if (req.query && (req.query.ping === '1' || req.query.ping === 'true')) {
+      return res.status(200).json({ ok: true, version: 'calc-v2.3' });
+    }
+    return res.status(405).json({ ok: false, reason: 'method_not_allowed' });
+  }
+
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') {
     return res.status(405).json({ ok: false, reason: 'method_not_allowed' });
@@ -18,9 +27,9 @@ export default async function handler(req, res) {
 
   try {
     // --- ENV ---
-    const token = process.env.APISHIP_TOKEN;           // строка токена (может быть без "Bearer ")
-    const senderId = process.env.APISHIP_SENDER_ID;    // warehouseId (например: 2679)
-    const senderGuid = process.env.APISHIP_SENDER_GUID;// cityGuid     (например: 5f29...9d5f)
+    const token = process.env.APISHIP_TOKEN;            // токен ApiShip (можно без префикса)
+    const senderId = process.env.APISHIP_SENDER_ID;     // warehouseId (напр. 2679)
+    const senderGuid = process.env.APISHIP_SENDER_GUID; // cityGuid    (напр. 5f29...9d5f)
 
     if (!token || !senderId || !senderGuid) {
       return res.status(500).json({
@@ -32,12 +41,12 @@ export default async function handler(req, res) {
 
     // --- входные данные ---
     const {
-      // страна/город получателя
+      // страна / город получателя
       toCountryCode,          // "RU" | "AM" | "KZ" | "BY" | ...
-      toGuid,                 // GUID города получателя (желательно для нероссийских стран)
-      toCity,                 // строка названия города, если нет GUID
-      toAddress,              // улица/дом (опц.)
-      postIndex,              // индекс (опц.; обязателен для ПВЗ в ряде кейсов)
+      toGuid,                 // GUID города получателя (желательно для не-RU)
+      toCity,                 // если GUID нет
+      toAddress,
+      postIndex,
 
       // габариты и вес
       weightKg,
@@ -46,12 +55,12 @@ export default async function handler(req, res) {
       // деньги
       declaredValue,
 
-      // опции
+      // флаги
       pickup = true,
       delivery = true
     } = req.body || {};
 
-    // Базовая валидация
+    // Валидация
     if (!weightKg || Number(weightKg) <= 0) {
       return res.status(400).json({ ok: false, reason: 'weight_required' });
     }
@@ -59,33 +68,29 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, reason: 'dest_required' });
     }
 
-    // Важная логика для НЕ-России:
-    // если страна указана и это НЕ RU, но нет GUID, чаще всего провайдеры не дадут тарифы.
-    // Возвращаем мягкую деградацию, чтобы фронт не падал и дал оформить вручную.
+    // Для стран != RU без GUID делаем «мягкую деградацию»
     if (toCountryCode && toCountryCode !== 'RU' && !toGuid) {
       return res.status(200).json({
         ok: false,
         reason: 'no_offers',
         message: 'Автоматический расчёт недоступен для этой страны. Мы подтвердим стоимость доставки менеджером.',
-        version: 'calc-v2.2'
+        version: 'calc-v2.3'
       });
     }
 
-    // Сбор payload под калькулятор ApiShip
+    // Payload для ApiShip калькулятора (плоская форма)
     const payload = {
-      // Плоская форма (совместима с их калькулятором)
-      weight: Math.round(Number(weightKg) * 1000) / 1000, // кг
+      weight: Math.round(Number(weightKg) * 1000) / 1000,
       width:  widthCm ? Number(widthCm) : undefined,
       height: heightCm ? Number(heightCm) : undefined,
       length: lengthCm ? Number(lengthCm) : undefined,
       assessedCost: declaredValue != null ? Number(declaredValue) : undefined,
 
-      // Разрешаем и курьер, и ПВЗ
-      pickupTypes: [1, 2],     // 1 - от двери, 2 - от пункта
-      deliveryTypes: [1, 2],   // 1 - до двери, 2 - до пункта
+      pickupTypes: [1, 2],
+      deliveryTypes: [1, 2],
 
       from: {
-        countryCode: 'RU',                     // наш склад в РФ
+        countryCode: 'RU',
         cityGuid: String(senderGuid),
         warehouseId: Number(senderId)
       },
@@ -98,7 +103,6 @@ export default async function handler(req, res) {
       }
     };
 
-    // Заголовок авторизации: подстраховка — если токен без префикса, добавим Bearer
     const authHeader = token.trim().toLowerCase().startsWith('bearer ')
       ? token.trim()
       : `Bearer ${token.trim()}`;
@@ -117,18 +121,16 @@ export default async function handler(req, res) {
     let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
     if (!resp.ok) {
-      // Если валидация по городу/региону — отдадим это наверх, фронт покажет текст
       return res.status(resp.status).json({
         ok: false,
         reason: 'apiship_error',
         status: resp.status,
-        version: 'calc-v2.2',
+        version: 'calc-v2.3',
         payloadSent: payload,
         data
       });
     }
 
-    // ApiShip может вернуть разную структуру; нормализуем к offers
     const offers = Array.isArray(data?.offers) ? data.offers
                   : data?.data?.offers ? data.data.offers
                   : data?.data || data;
@@ -138,13 +140,13 @@ export default async function handler(req, res) {
         ok: false,
         reason: 'no_offers',
         message: 'Подходящих тарифов не найдено. Попробуйте другой адрес или страну.',
-        version: 'calc-v2.2'
+        version: 'calc-v2.3'
       });
     }
 
     return res.status(200).json({
       ok: true,
-      version: 'calc-v2.2',
+      version: 'calc-v2.3',
       offers,
       raw: data
     });
