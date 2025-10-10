@@ -1,35 +1,26 @@
 // /api/apiship/calc.js
-// Vercel Serverless Function — расчёт доставки через ApiShip
-// v2.1 (flat payload + GET /ping for version check)
-
-const HANDLER_VERSION = 'calc-v2.1';
+// Vercel Serverless Function — расчёт доставки через ApiShip (calc-v2.2)
 
 function setCORS(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-const APISHIP_BASE = process.env.APISHIP_BASE || 'https://api.apiship.ru'; // без /v1
+const APISHIP_BASE = process.env.APISHIP_BASE || 'https://api.apiship.ru/v1';
 
 export default async function handler(req, res) {
   setCORS(res);
-
-  // Быстрый "пинг", чтобы глазами убедиться, что задеплоена новая версия
-  if (req.method === 'GET') {
-    return res.status(200).json({ ok: true, version: HANDLER_VERSION });
-  }
-
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') {
     return res.status(405).json({ ok: false, reason: 'method_not_allowed' });
   }
 
   try {
-    // ENV
-    const token = process.env.APISHIP_TOKEN;            // напр. 3613dd9...
-    const senderId = process.env.APISHIP_SENDER_ID;     // 2679
-    const senderGuid = process.env.APISHIP_SENDER_GUID; // 5f29...9d5f
+    // --- ENV ---
+    const token = process.env.APISHIP_TOKEN;           // строка токена (может быть без "Bearer ")
+    const senderId = process.env.APISHIP_SENDER_ID;    // warehouseId (например: 2679)
+    const senderGuid = process.env.APISHIP_SENDER_GUID;// cityGuid     (например: 5f29...9d5f)
 
     if (!token || !senderId || !senderGuid) {
       return res.status(500).json({
@@ -39,64 +30,83 @@ export default async function handler(req, res) {
       });
     }
 
-    // Входные поля
+    // --- входные данные ---
     const {
-      toGuid,                  // GUID города получателя (предпочтительно)
-      toCity,                  // название города (если нет GUID)
-      toAddress,               // улица/дом (опционально)
-      weightKg,                // вес в кг (напр. 0.8)
-      lengthCm, widthCm, heightCm, // габариты в см (опц.)
-      declaredValue,           // объявленная ценность, ₽ (число)
-      providerKeys,            // массив строк, напр. ["cdek","boxberry","dpd"]
-      pickup = true,           // забор у отправителя (true)
-      delivery = true          // доставка до получателя (true)
+      // страна/город получателя
+      toCountryCode,          // "RU" | "AM" | "KZ" | "BY" | ...
+      toGuid,                 // GUID города получателя (желательно для нероссийских стран)
+      toCity,                 // строка названия города, если нет GUID
+      toAddress,              // улица/дом (опц.)
+      postIndex,              // индекс (опц.; обязателен для ПВЗ в ряде кейсов)
+
+      // габариты и вес
+      weightKg,
+      lengthCm, widthCm, heightCm,
+
+      // деньги
+      declaredValue,
+
+      // опции
+      pickup = true,
+      delivery = true
     } = req.body || {};
 
-    if (!toGuid && !toCity) {
-      return res.status(400).json({ ok: false, reason: 'dest_required' });
-    }
+    // Базовая валидация
     if (!weightKg || Number(weightKg) <= 0) {
       return res.status(400).json({ ok: false, reason: 'weight_required' });
     }
+    if (!toGuid && !toCity) {
+      return res.status(400).json({ ok: false, reason: 'dest_required' });
+    }
 
-    // ApiShip ждёт вес в ГРАММАХ
-    const weightG = Math.round(Number(weightKg) * 1000);
+    // Важная логика для НЕ-России:
+    // если страна указана и это НЕ RU, но нет GUID, чаще всего провайдеры не дадут тарифы.
+    // Возвращаем мягкую деградацию, чтобы фронт не падал и дал оформить вручную.
+    if (toCountryCode && toCountryCode !== 'RU' && !toGuid) {
+      return res.status(200).json({
+        ok: false,
+        reason: 'no_offers',
+        message: 'Автоматический расчёт недоступен для этой страны. Мы подтвердим стоимость доставки менеджером.',
+        version: 'calc-v2.2'
+      });
+    }
 
-    // 1 — до двери, 2 — до ПВЗ
-    const pickupTypes   = pickup   ? [1, 2] : [];
-    const deliveryTypes = delivery ? [1, 2] : [];
-
-    // ✅ ПЛОСКАЯ схема калькулятора (НЕ packages/ options)
+    // Сбор payload под калькулятор ApiShip
     const payload = {
-      weight: weightG,
-      width:  widthCm  != null ? Number(widthCm)  : undefined,
-      height: heightCm != null ? Number(heightCm) : undefined,
-      length: lengthCm != null ? Number(lengthCm) : undefined,
+      // Плоская форма (совместима с их калькулятором)
+      weight: Math.round(Number(weightKg) * 1000) / 1000, // кг
+      width:  widthCm ? Number(widthCm) : undefined,
+      height: heightCm ? Number(heightCm) : undefined,
+      length: lengthCm ? Number(lengthCm) : undefined,
       assessedCost: declaredValue != null ? Number(declaredValue) : undefined,
 
-      pickupTypes,
-      deliveryTypes,
+      // Разрешаем и курьер, и ПВЗ
+      pickupTypes: [1, 2],     // 1 - от двери, 2 - от пункта
+      deliveryTypes: [1, 2],   // 1 - до двери, 2 - до пункта
 
       from: {
-        countryCode: 'RU',
+        countryCode: 'RU',                     // наш склад в РФ
         cityGuid: String(senderGuid),
         warehouseId: Number(senderId)
       },
       to: {
-        countryCode: 'RU',
+        countryCode: toCountryCode ? String(toCountryCode) : undefined,
         cityGuid: toGuid ? String(toGuid) : undefined,
         city: (!toGuid && toCity) ? String(toCity) : undefined,
-        addressString: toAddress ? String(toAddress) : undefined
-      },
-
-      providerKeys: Array.isArray(providerKeys) && providerKeys.length ? providerKeys : undefined
+        addressString: toAddress ? String(toAddress) : undefined,
+        postIndex: postIndex ? String(postIndex) : undefined
+      }
     };
+
+    // Заголовок авторизации: подстраховка — если токен без префикса, добавим Bearer
+    const authHeader = token.trim().toLowerCase().startsWith('bearer ')
+      ? token.trim()
+      : `Bearer ${token.trim()}`;
 
     const resp = await fetch(`${APISHIP_BASE}/calculator`, {
       method: 'POST',
       headers: {
-        // ВАЖНО: без "Bearer "
-        'Authorization': token,
+        'Authorization': authHeader,
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       },
@@ -104,32 +114,42 @@ export default async function handler(req, res) {
     });
 
     const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
     if (!resp.ok) {
+      // Если валидация по городу/региону — отдадим это наверх, фронт покажет текст
       return res.status(resp.status).json({
         ok: false,
         reason: 'apiship_error',
         status: resp.status,
-        version: HANDLER_VERSION,
+        version: 'calc-v2.2',
         payloadSent: payload,
         data
       });
     }
 
-    // Где-то это data.offers, где-то сразу массив
+    // ApiShip может вернуть разную структуру; нормализуем к offers
     const offers = Array.isArray(data?.offers) ? data.offers
-                  : (Array.isArray(data) ? data
-                  : (data?.data || data));
+                  : data?.data?.offers ? data.data.offers
+                  : data?.data || data;
+
+    if (!offers || (Array.isArray(offers) && offers.length === 0)) {
+      return res.status(200).json({
+        ok: false,
+        reason: 'no_offers',
+        message: 'Подходящих тарифов не найдено. Попробуйте другой адрес или страну.',
+        version: 'calc-v2.2'
+      });
+    }
 
     return res.status(200).json({
       ok: true,
-      version: HANDLER_VERSION,
+      version: 'calc-v2.2',
       offers,
       raw: data
     });
+
   } catch (e) {
-    return res.status(500).json({ ok: false, reason: 'internal_error', version: HANDLER_VERSION, error: String(e) });
+    return res.status(500).json({ ok: false, reason: 'internal_error', error: String(e) });
   }
 }
