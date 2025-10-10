@@ -1,18 +1,30 @@
-// api/apiship/_authcheck.js
-export default async function handler(req, res) {
+// /api/apiship/_authcheck.js
+function setCORS(res){
   res.setHeader('Access-Control-Allow-Origin', '*');
-  try {
-    const base = process.env.APISHIP_BASE?.replace(/\/+$/, '') || 'https://api.apiship.ru';
-    const token = (process.env.APISHIP_TOKEN || '').trim();
-    if (!token) return res.status(500).json({ ok:false, reason:'no_token' });
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+export default async function handler(req, res){
+  setCORS(res);
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-    const url = `${base}/tariffs?limit=1`;
-    const r = await fetch(url, { headers: { 'Authorization': token, 'Accept': 'application/json' }});
+  const BASE  = (process.env.APISHIP_BASE || 'https://api.apiship.ru/v1').replace(/\/+$/,'');
+  const TOKEN = process.env.APISHIP_TOKEN || '';
+
+  const url = `${BASE}/lists/tariffs?limit=1`;
+  try{
+    const r = await fetch(url, { headers: { 'Authorization': TOKEN }});
     const text = await r.text();
-    return res.status(200).json({ ok: r.ok, status: r.status, url, token_len: token.length, body: safeJSON(text) });
+    let body; try { body = JSON.parse(text); } catch { body = { raw: text }; }
 
-    function safeJSON(t){ try{ return JSON.parse(t); }catch{ return t; } }
-  } catch (e) {
-    return res.status(500).json({ ok:false, reason:'authcheck_fail', error: String(e) });
+    return res.status(200).json({
+      ok: r.ok,
+      status: r.status,
+      url,
+      token_len: TOKEN.length,
+      body
+    });
+  }catch(e){
+    return res.status(500).json({ ok:false, error:String(e), url, token_len:TOKEN.length });
   }
 }
