@@ -103,9 +103,8 @@ export default async function handler(req, res) {
       }
     };
 
-    const authHeader = token.trim().toLowerCase().startsWith('bearer ')
-      ? token.trim()
-      : `Bearer ${token.trim()}`;
+    // ApiShip принимает "Authorization: <token>" БЕЗ "Bearer "
+const authHeader = token.trim();
 
     const resp = await fetch(`${APISHIP_BASE}/calculator`, {
       method: 'POST',
